@@ -11,7 +11,6 @@ import ObjectiveC
 private var fileUploadCoordinatorKey: UInt8 = 0
 
 private final class FileUploadCoordinator: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDelegate {
-
     private let completionHandler: ([URL]?) -> Void
     private weak var presenter: UIViewController?
 
@@ -90,7 +89,6 @@ private final class FileUploadCoordinator: NSObject, PHPickerViewControllerDeleg
 
         if #available(iOS 14.0, *) {
             var configuration = PHPickerConfiguration()
-
             configuration.filter = .images
             configuration.selectionLimit = 1
 
@@ -200,12 +198,18 @@ private final class FileUploadCoordinator: NSObject, PHPickerViewControllerDeleg
 
             let type = UTType(imageTypeIdentifier)
 
-            let fileExtension =
-                type?.preferredFilenameExtension
-                ?? temporaryURL.pathExtension
-                .isEmpty
-                ? "jpg"
-                : temporaryURL.pathExtension
+            let fileExtension: String = {
+                if let preferredExtension = type?.preferredFilenameExtension,
+                   !preferredExtension.isEmpty {
+                    return preferredExtension
+                }
+
+                let fallbackExtension = temporaryURL.pathExtension
+
+                return fallbackExtension.isEmpty
+                    ? "jpg"
+                    : fallbackExtension
+            }()
 
             let destinationURL =
                 FileManager.default.temporaryDirectory
@@ -343,6 +347,7 @@ func createWebView(
     config.limitsNavigationsToAppBoundDomains = true
     config.allowsInlineMediaPlayback = true
     config.preferences.javaScriptCanOpenWindowsAutomatically = true
+
     config.preferences.setValue(
         true,
         forKey: "standalone"
@@ -555,6 +560,10 @@ extension ViewController: WKUIDelegate, WKDownloadDelegate {
 
     // MARK: File Upload
 
+    // Esta API de customização do upload foi introduzida no iOS 18.4.
+    // Em versões anteriores, o WKWebView usa o comportamento
+    // padrão de upload do Safari.
+    @available(iOS 18.4, *)
     func webView(
         _ webView: WKWebView,
         runOpenPanelWith parameters: WKOpenPanelParameters,
@@ -573,6 +582,7 @@ extension ViewController: WKUIDelegate, WKDownloadDelegate {
             // Libera o coordinator depois que o upload
             // foi entregue ao WebKit.
             if let webView = webView {
+
                 objc_setAssociatedObject(
                     webView,
                     &fileUploadCoordinatorKey,
@@ -642,7 +652,6 @@ extension ViewController: WKUIDelegate, WKDownloadDelegate {
                 if UIApplication.shared.canOpenURL(
                     requestUrl
                 ) {
-
                     UIApplication.shared.open(
                         requestUrl
                     )
@@ -665,6 +674,7 @@ extension ViewController: WKUIDelegate, WKDownloadDelegate {
                     decisionHandler(.allow)
 
                     if toolbarView.isHidden {
+
                         toolbarView.isHidden = false
 
                         webView.frame =
@@ -687,6 +697,7 @@ extension ViewController: WKUIDelegate, WKDownloadDelegate {
                     decisionHandler(.allow)
 
                     if !toolbarView.isHidden {
+
                         toolbarView.isHidden = true
 
                         webView.frame =
@@ -703,8 +714,7 @@ extension ViewController: WKUIDelegate, WKDownloadDelegate {
                     && navigationAction.value(
                         forKey: "syntheticClickType"
                     ) as! Int == 0
-                    && navigationAction.targetFrame != nil
-                    && navigationAction.sourceFrame != nil {
+                    && navigationAction.targetFrame != nil {
 
                     decisionHandler(.allow)
                     return
