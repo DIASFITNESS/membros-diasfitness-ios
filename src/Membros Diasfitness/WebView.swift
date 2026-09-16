@@ -2,381 +2,1031 @@ import UIKit
 import WebKit
 import AuthenticationServices
 import SafariServices
+import PhotosUI
+import UniformTypeIdentifiers
+import ObjectiveC
+
+// MARK: - File Upload Coordinator
+
+private var fileUploadCoordinatorKey: UInt8 = 0
+
+private final class FileUploadCoordinator: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDelegate {
+
+    private let completionHandler: ([URL]?) -> Void
+    private weak var presenter: UIViewController?
+
+    init(
+        presenter: UIViewController,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        self.presenter = presenter
+        self.completionHandler = completionHandler
+        super.init()
+    }
+
+    // MARK: Source Selection
+
+    func presentSourceChooser() {
+        guard let presenter = presenter else {
+            completionHandler(nil)
+            return
+        }
+
+        let alert = UIAlertController(
+            title: "Selecionar foto",
+            message: "Escolha de onde deseja selecionar a imagem.",
+            preferredStyle: .actionSheet
+        )
+
+        alert.addAction(
+            UIAlertAction(
+                title: "Biblioteca de Fotos",
+                style: .default
+            ) { [weak self] _ in
+                self?.presentPhotoPicker()
+            }
+        )
+
+        alert.addAction(
+            UIAlertAction(
+                title: "Escolher Arquivo",
+                style: .default
+            ) { [weak self] _ in
+                self?.presentDocumentPicker()
+            }
+        )
+
+        alert.addAction(
+            UIAlertAction(
+                title: "Cancelar",
+                style: .cancel
+            ) { [weak self] _ in
+                self?.completionHandler(nil)
+            }
+        )
+
+        // Necessário para apresentação correta em iPad.
+        if let popover = alert.popoverPresentationController {
+            popover.sourceView = presenter.view
+            popover.sourceRect = CGRect(
+                x: presenter.view.bounds.midX,
+                y: presenter.view.bounds.midY,
+                width: 0,
+                height: 0
+            )
+            popover.permittedArrowDirections = []
+        }
+
+        presenter.present(alert, animated: true)
+    }
+
+    // MARK: Photo Library
+
+    private func presentPhotoPicker() {
+        guard let presenter = presenter else {
+            completionHandler(nil)
+            return
+        }
+
+        if #available(iOS 14.0, *) {
+            var configuration = PHPickerConfiguration()
+
+            configuration.filter = .images
+            configuration.selectionLimit = 1
+
+            let picker = PHPickerViewController(
+                configuration: configuration
+            )
+
+            picker.delegate = self
+
+            presenter.present(
+                picker,
+                animated: true
+            )
+        } else {
+            // Fallback para versões antigas do iOS.
+            let picker = UIDocumentPickerViewController(
+                documentTypes: ["public.image"],
+                in: .import
+            )
+
+            picker.delegate = self
+            picker.allowsMultipleSelection = false
+
+            presenter.present(
+                picker,
+                animated: true
+            )
+        }
+    }
+
+    // MARK: Document Picker
+
+    private func presentDocumentPicker() {
+        guard let presenter = presenter else {
+            completionHandler(nil)
+            return
+        }
+
+        if #available(iOS 14.0, *) {
+            let picker = UIDocumentPickerViewController(
+                forOpeningContentTypes: [.image],
+                asCopy: true
+            )
+
+            picker.delegate = self
+            picker.allowsMultipleSelection = false
+
+            presenter.present(
+                picker,
+                animated: true
+            )
+        } else {
+            let picker = UIDocumentPickerViewController(
+                documentTypes: ["public.image"],
+                in: .import
+            )
+
+            picker.delegate = self
+            picker.allowsMultipleSelection = false
+
+            presenter.present(
+                picker,
+                animated: true
+            )
+        }
+    }
+
+    // MARK: PHPickerViewControllerDelegate
+
+    @available(iOS 14.0, *)
+    func picker(
+        _ picker: PHPickerViewController,
+        didFinishPicking results: [PHPickerResult]
+    ) {
+        picker.dismiss(animated: true)
+
+        guard let result = results.first else {
+            completionHandler(nil)
+            return
+        }
+
+        let provider = result.itemProvider
+
+        let imageTypeIdentifier =
+            provider.registeredTypeIdentifiers.first {
+                UTType($0)?.conforms(to: .image) == true
+            }
+            ?? UTType.image.identifier
+
+        provider.loadFileRepresentation(
+            forTypeIdentifier: imageTypeIdentifier
+        ) { [weak self] temporaryURL, error in
+
+            guard let self = self else {
+                return
+            }
+
+            guard
+                let temporaryURL = temporaryURL,
+                error == nil
+            else {
+                DispatchQueue.main.async {
+                    self.completionHandler(nil)
+                }
+                return
+            }
+
+            let type = UTType(imageTypeIdentifier)
+
+            let fileExtension =
+                type?.preferredFilenameExtension
+                ?? temporaryURL.pathExtension
+                .isEmpty
+                ? "jpg"
+                : temporaryURL.pathExtension
+
+            let destinationURL =
+                FileManager.default.temporaryDirectory
+                    .appendingPathComponent(
+                        "diasfitness-profile-\(UUID().uuidString)"
+                    )
+                    .appendingPathExtension(fileExtension)
+
+            do {
+                if FileManager.default.fileExists(
+                    atPath: destinationURL.path
+                ) {
+                    try FileManager.default.removeItem(
+                        at: destinationURL
+                    )
+                }
+
+                try FileManager.default.copyItem(
+                    at: temporaryURL,
+                    to: destinationURL
+                )
+
+                DispatchQueue.main.async {
+                    self.completionHandler([destinationURL])
+                }
+
+            } catch {
+                DispatchQueue.main.async {
+                    self.completionHandler(nil)
+                }
+            }
+        }
+    }
+
+    // MARK: UIDocumentPickerDelegate
+
+    func documentPicker(
+        _ controller: UIDocumentPickerViewController,
+        didPickDocumentsAt urls: [URL]
+    ) {
+        guard let sourceURL = urls.first else {
+            completionHandler(nil)
+            return
+        }
+
+        let didStartAccessing =
+            sourceURL.startAccessingSecurityScopedResource()
+
+        defer {
+            if didStartAccessing {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let destinationURL =
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent(
+                    "diasfitness-profile-\(UUID().uuidString)"
+                )
+                .appendingPathExtension(
+                    sourceURL.pathExtension.isEmpty
+                    ? "jpg"
+                    : sourceURL.pathExtension
+                )
+
+        do {
+            if FileManager.default.fileExists(
+                atPath: destinationURL.path
+            ) {
+                try FileManager.default.removeItem(
+                    at: destinationURL
+                )
+            }
+
+            try FileManager.default.copyItem(
+                at: sourceURL,
+                to: destinationURL
+            )
+
+            completionHandler([destinationURL])
+
+        } catch {
+            completionHandler(nil)
+        }
+    }
+
+    func documentPickerWasCancelled(
+        _ controller: UIDocumentPickerViewController
+    ) {
+        completionHandler(nil)
+    }
+}
 
 
-func createWebView(container: UIView, WKSMH: WKScriptMessageHandler, WKND: WKNavigationDelegate, NSO: NSObject, VC: ViewController) -> WKWebView{
+// MARK: - WebView Creation
+
+func createWebView(
+    container: UIView,
+    WKSMH: WKScriptMessageHandler,
+    WKND: WKNavigationDelegate,
+    NSO: NSObject,
+    VC: ViewController
+) -> WKWebView {
 
     let config = WKWebViewConfiguration()
     let userContentController = WKUserContentController()
 
-    userContentController.add(WKSMH, name: "print")
-    userContentController.add(WKSMH, name: "push-subscribe")
-    userContentController.add(WKSMH, name: "push-permission-request")
-    userContentController.add(WKSMH, name: "push-permission-state")
-    userContentController.add(WKSMH, name: "push-token")
+    userContentController.add(
+        WKSMH,
+        name: "print"
+    )
+
+    userContentController.add(
+        WKSMH,
+        name: "push-subscribe"
+    )
+
+    userContentController.add(
+        WKSMH,
+        name: "push-permission-request"
+    )
+
+    userContentController.add(
+        WKSMH,
+        name: "push-permission-state"
+    )
+
+    userContentController.add(
+        WKSMH,
+        name: "push-token"
+    )
 
     config.userContentController = userContentController
 
-    config.limitsNavigationsToAppBoundDomains = true;
+    config.limitsNavigationsToAppBoundDomains = true
     config.allowsInlineMediaPlayback = true
     config.preferences.javaScriptCanOpenWindowsAutomatically = true
-    config.preferences.setValue(true, forKey: "standalone")
-    
-    let webView = WKWebView(frame: calcWebviewFrame(webviewView: container, toolbarView: nil), configuration: config)
-    setCustomCookie(webView: webView)
+    config.preferences.setValue(
+        true,
+        forKey: "standalone"
+    )
 
-    webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    webView.isHidden = true;
+    let webView = WKWebView(
+        frame: calcWebviewFrame(
+            webviewView: container,
+            toolbarView: nil
+        ),
+        configuration: config
+    )
+
+    setCustomCookie(
+        webView: webView
+    )
+
+    webView.autoresizingMask = [
+        .flexibleWidth,
+        .flexibleHeight
+    ]
+
+    webView.isHidden = true
+
     webView.navigationDelegate = WKND
+
+    // IMPORTANTE:
+    // O WKUIDelegate controla os painéis nativos,
+    // incluindo o painel de upload de arquivos.
+    webView.uiDelegate = VC
+
     webView.scrollView.bounces = false
     webView.scrollView.contentInsetAdjustmentBehavior = .never
     webView.allowsBackForwardNavigationGestures = true
-    
-    // Check if macCatalyst 16.4+ is available and if so, enable web inspector.
-    // This allows the web app to be inspected using Safari Web Inspector. Supported on iOS 16.4+ and macOS 13.3+
+
+    // Check if macCatalyst 16.4+ is available and if so,
+    // enable web inspector.
+    // Supported on iOS 16.4+ and macOS 13.3+.
     if #available(iOS 16.4, macOS 13.3, *) {
         webView.isInspectable = true
     }
-    
+
     let deviceModel = UIDevice.current.model
     let osVersion = UIDevice.current.systemVersion
-    webView.configuration.applicationNameForUserAgent = "Safari/604.1"
-    webView.customUserAgent = "Mozilla/5.0 (\(deviceModel); CPU \(deviceModel) OS \(osVersion.replacingOccurrences(of: ".", with: "_")) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/\(osVersion) Mobile/15E148 Safari/604.1 PWAShell"
 
-    webView.addObserver(NSO, forKeyPath: #keyPath(WKWebView.estimatedProgress), options: NSKeyValueObservingOptions.new, context: nil)
-    
+    webView.configuration.applicationNameForUserAgent =
+        "Safari/604.1"
+
+    webView.customUserAgent =
+        "Mozilla/5.0 (\(deviceModel); CPU \(deviceModel) OS " +
+        "\(osVersion.replacingOccurrences(of: ".", with: "_")) " +
+        "like Mac OS X) AppleWebKit/605.1.15 " +
+        "(KHTML, like Gecko) Version/\(osVersion) " +
+        "Mobile/15E148 Safari/604.1 PWAShell"
+
+    webView.addObserver(
+        NSO,
+        forKeyPath: #keyPath(WKWebView.estimatedProgress),
+        options: NSKeyValueObservingOptions.new,
+        context: nil
+    )
+
     #if DEBUG
     if #available(iOS 16.4, *) {
         webView.isInspectable = true
     }
     #endif
-    
+
     return webView
 }
 
-func setAppStoreAsReferrer(contentController: WKUserContentController) {
-    let scriptSource = "document.referrer = `app-info://platform/ios-store`;"
-    let script = WKUserScript(source: scriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-    contentController.addUserScript(script);
+
+// MARK: - App Store Referrer
+
+func setAppStoreAsReferrer(
+    contentController: WKUserContentController
+) {
+    let scriptSource =
+        "document.referrer = `app-info://platform/ios-store`;"
+
+    let script = WKUserScript(
+        source: scriptSource,
+        injectionTime: .atDocumentEnd,
+        forMainFrameOnly: true
+    )
+
+    contentController.addUserScript(script)
 }
 
-func setCustomCookie(webView: WKWebView) {
-    let _platformCookie = HTTPCookie(properties: [
-        .domain: rootUrl.host!,
-        .path: "/",
-        .name: platformCookie.name,
-        .value: platformCookie.value,
-        .secure: "FALSE",
-        .expires: NSDate(timeIntervalSinceNow: 31556926)
-    ])!
 
-    webView.configuration.websiteDataStore.httpCookieStore.setCookie(_platformCookie)
+// MARK: - Custom Cookie
 
+func setCustomCookie(
+    webView: WKWebView
+) {
+    let _platformCookie = HTTPCookie(
+        properties: [
+            .domain: rootUrl.host!,
+            .path: "/",
+            .name: platformCookie.name,
+            .value: platformCookie.value,
+            .secure: "FALSE",
+            .expires: NSDate(
+                timeIntervalSinceNow: 31556926
+            )
+        ]
+    )!
+
+    webView.configuration
+        .websiteDataStore
+        .httpCookieStore
+        .setCookie(_platformCookie)
 }
 
-func calcWebviewFrame(webviewView: UIView, toolbarView: UIToolbar?) -> CGRect{
+
+// MARK: - WebView Frame
+
+func calcWebviewFrame(
+    webviewView: UIView,
+    toolbarView: UIToolbar?
+) -> CGRect {
+
     if ((toolbarView) != nil) {
-        return CGRect(x: 0, y: toolbarView!.frame.height, width: webviewView.frame.width, height: webviewView.frame.height - toolbarView!.frame.height)
-    }
-    else {
-        let winScene = UIApplication.shared.connectedScenes.first
-        let windowScene = winScene as! UIWindowScene
-        var statusBarHeight = windowScene.statusBarManager?.statusBarFrame.height ?? 0
+
+        return CGRect(
+            x: 0,
+            y: toolbarView!.frame.height,
+            width: webviewView.frame.width,
+            height: webviewView.frame.height
+                - toolbarView!.frame.height
+        )
+
+    } else {
+
+        let winScene =
+            UIApplication.shared.connectedScenes.first
+
+        let windowScene =
+            winScene as! UIWindowScene
+
+        var statusBarHeight =
+            windowScene.statusBarManager?
+                .statusBarFrame.height ?? 0
 
         switch displayMode {
+
         case "fullscreen":
+
             #if targetEnvironment(macCatalyst)
-                if let titlebar = windowScene.titlebar {
-                    titlebar.titleVisibility = .hidden
-                    titlebar.toolbar = nil
-                }
+
+            if let titlebar = windowScene.titlebar {
+                titlebar.titleVisibility = .hidden
+                titlebar.toolbar = nil
+            }
+
             #endif
-            return CGRect(x: 0, y: 0, width: webviewView.frame.width, height: webviewView.frame.height)
+
+            return CGRect(
+                x: 0,
+                y: 0,
+                width: webviewView.frame.width,
+                height: webviewView.frame.height
+            )
+
         default:
+
             #if targetEnvironment(macCatalyst)
+
             statusBarHeight = 29
+
             #endif
-            let windowHeight = webviewView.frame.height - statusBarHeight
-            return CGRect(x: 0, y: statusBarHeight, width: webviewView.frame.width, height: windowHeight)
+
+            let windowHeight =
+                webviewView.frame.height
+                - statusBarHeight
+
+            return CGRect(
+                x: 0,
+                y: statusBarHeight,
+                width: webviewView.frame.width,
+                height: windowHeight
+            )
         }
     }
 }
 
+
+// MARK: - WKUIDelegate / WKDownloadDelegate
+
 extension ViewController: WKUIDelegate, WKDownloadDelegate {
-    // redirect new tabs to main webview
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if (navigationAction.targetFrame == nil) {
-            webView.load(navigationAction.request)
+
+    // MARK: New Tabs
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+
+        if navigationAction.targetFrame == nil {
+            webView.load(
+                navigationAction.request
+            )
         }
+
         return nil
     }
-    // restrict navigation to target host, open external links in 3rd party apps
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if (navigationAction.request.url?.scheme == "about") {
+
+
+    // MARK: File Upload
+
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+
+        // O arquivo pode solicitar múltipla seleção,
+        // mas para a foto de perfil usamos uma única imagem.
+        let coordinator = FileUploadCoordinator(
+            presenter: self
+        ) { [weak webView] urls in
+
+            completionHandler(urls)
+
+            // Libera o coordinator depois que o upload
+            // foi entregue ao WebKit.
+            if let webView = webView {
+                objc_setAssociatedObject(
+                    webView,
+                    &fileUploadCoordinatorKey,
+                    nil,
+                    .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+                )
+            }
+        }
+
+        // Mantém o coordinator vivo durante toda a seleção.
+        objc_setAssociatedObject(
+            webView,
+            &fileUploadCoordinatorKey,
+            coordinator,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
+        coordinator.presentSourceChooser()
+    }
+
+
+    // MARK: Navigation Policy
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (
+            WKNavigationActionPolicy
+        ) -> Void
+    ) {
+
+        if navigationAction.request.url?.scheme == "about" {
             return decisionHandler(.allow)
         }
-        if (navigationAction.shouldPerformDownload || navigationAction.request.url?.scheme == "blob") {
+
+        if navigationAction.shouldPerformDownload
+            || navigationAction.request.url?.scheme == "blob" {
+
             return decisionHandler(.download)
         }
 
-        if let requestUrl = navigationAction.request.url{
-            // Schemes that should always be handed off to the system/other apps rather than
-            // being processed as in-app navigation (e.g. phone calls, email, maps, FaceTime, etc.)
-            let externalSchemes = ["tel", "telprompt", "mailto", "facetime", "facetime-audio", "fb", "fb-messenger", "sms", "itms-services", "itms-apps", "itms", "maps"]
-            if let requestScheme = requestUrl.scheme?.lowercased(), externalSchemes.contains(requestScheme) {
+        if let requestUrl = navigationAction.request.url {
+
+            // Schemes that should always be handed off
+            // to the system / other apps.
+            let externalSchemes = [
+                "tel",
+                "telprompt",
+                "mailto",
+                "facetime",
+                "facetime-audio",
+                "fb",
+                "fb-messenger",
+                "sms",
+                "itms-services",
+                "itms-apps",
+                "itms",
+                "maps"
+            ]
+
+            if let requestScheme =
+                requestUrl.scheme?.lowercased(),
+               externalSchemes.contains(requestScheme) {
+
                 decisionHandler(.cancel)
-                if UIApplication.shared.canOpenURL(requestUrl) {
-                    UIApplication.shared.open(requestUrl)
+
+                if UIApplication.shared.canOpenURL(
+                    requestUrl
+                ) {
+
+                    UIApplication.shared.open(
+                        requestUrl
+                    )
                 }
+
                 return
             }
 
             if let requestHost = requestUrl.host {
-                // NOTE: Match auth origin first, because host origin may be a subset of auth origin and may therefore always match
-                let matchingAuthOrigin = authOrigins.first(where: { requestHost.range(of: $0) != nil })
-                if (matchingAuthOrigin != nil) {
-                    decisionHandler(.allow)
-                    if (toolbarView.isHidden) {
-                        toolbarView.isHidden = false
-                        webView.frame = calcWebviewFrame(webviewView: webviewView, toolbarView: toolbarView)
+
+                // Match auth origin first because host origin
+                // may be a subset of auth origin.
+                let matchingAuthOrigin =
+                    authOrigins.first {
+                        requestHost.range(of: $0) != nil
                     }
+
+                if matchingAuthOrigin != nil {
+
+                    decisionHandler(.allow)
+
+                    if toolbarView.isHidden {
+                        toolbarView.isHidden = false
+
+                        webView.frame =
+                            calcWebviewFrame(
+                                webviewView: webviewView,
+                                toolbarView: toolbarView
+                            )
+                    }
+
                     return
                 }
 
-                let matchingHostOrigin = allowedOrigins.first(where: { requestHost.range(of: $0) != nil })
-                if (matchingHostOrigin != nil) {
-                    // Open in main webview
-                    decisionHandler(.allow)
-                    if (!toolbarView.isHidden) {
-                        toolbarView.isHidden = true
-                        webView.frame = calcWebviewFrame(webviewView: webviewView, toolbarView: nil)
+                let matchingHostOrigin =
+                    allowedOrigins.first {
+                        requestHost.range(of: $0) != nil
                     }
+
+                if matchingHostOrigin != nil {
+
+                    decisionHandler(.allow)
+
+                    if !toolbarView.isHidden {
+                        toolbarView.isHidden = true
+
+                        webView.frame =
+                            calcWebviewFrame(
+                                webviewView: webviewView,
+                                toolbarView: nil
+                            )
+                    }
+
                     return
                 }
-                if (navigationAction.navigationType == .other &&
-                    navigationAction.value(forKey: "syntheticClickType") as! Int == 0 &&
-                    (navigationAction.targetFrame != nil) &&
-                    // no error here, fake warning
-                    (navigationAction.sourceFrame != nil)
-                ) {
+
+                if navigationAction.navigationType == .other
+                    && navigationAction.value(
+                        forKey: "syntheticClickType"
+                    ) as! Int == 0
+                    && navigationAction.targetFrame != nil
+                    && navigationAction.sourceFrame != nil {
+
                     decisionHandler(.allow)
                     return
-                }
-                else {
+
+                } else {
+
                     decisionHandler(.cancel)
                 }
 
+                if ["http", "https"].contains(
+                    requestUrl.scheme?.lowercased() ?? ""
+                ) {
 
-                if ["http", "https"].contains(requestUrl.scheme?.lowercased() ?? "") {
-                    // Can open with SFSafariViewController
-                    let safariViewController = SFSafariViewController(url: requestUrl)
-                    self.present(safariViewController, animated: true, completion: nil)
+                    let safariViewController =
+                        SFSafariViewController(
+                            url: requestUrl
+                        )
+
+                    self.present(
+                        safariViewController,
+                        animated: true,
+                        completion: nil
+                    )
+
                 } else {
-                    // Scheme is not supported or no scheme is given, use openURL
-                    if (UIApplication.shared.canOpenURL(requestUrl)) {
-                        UIApplication.shared.open(requestUrl)
+
+                    if UIApplication.shared.canOpenURL(
+                        requestUrl
+                    ) {
+
+                        UIApplication.shared.open(
+                            requestUrl
+                        )
                     }
                 }
+
             } else {
+
                 decisionHandler(.cancel)
+
                 if requestUrl.isFileURL {
-                    // not tested
-                    downloadAndOpenFile(url: requestUrl.absoluteURL)
+
+                    downloadAndOpenFile(
+                        url: requestUrl.absoluteURL
+                    )
                 }
-                // if (requestUrl.absoluteString.contains("base64")){
-                //     downloadAndOpenBase64File(base64String: requestUrl.absoluteString)
-                // }
             }
-        }
-        else {
+
+        } else {
+
             decisionHandler(.cancel)
         }
-
     }
-    // Handle javascript: `window.alert(message: String)`
-    func webView(_ webView: WKWebView,
+
+
+    // MARK: JavaScript Alert
+
+    func webView(
+        _ webView: WKWebView,
         runJavaScriptAlertPanelWithMessage message: String,
         initiatedByFrame frame: WKFrameInfo,
-        completionHandler: @escaping () -> Void) {
+        completionHandler: @escaping () -> Void
+    ) {
 
-        // Set the message as the UIAlertController message
         let alert = UIAlertController(
             title: nil,
             message: message,
             preferredStyle: .alert
         )
 
-        // Add a confirmation action “OK”
         let okAction = UIAlertAction(
             title: "OK",
-            style: .default,
-            handler: { _ in
-                // Call completionHandler
-                completionHandler()
-            }
-        )
+            style: .default
+        ) { _ in
+
+            completionHandler()
+        }
+
         alert.addAction(okAction)
 
-        // Display the NSAlert
-        present(alert, animated: true, completion: nil)
+        present(
+            alert,
+            animated: true,
+            completion: nil
+        )
     }
-    // Handle javascript: `window.confirm(message: String)`
-    func webView(_ webView: WKWebView,
+
+
+    // MARK: JavaScript Confirm
+
+    func webView(
+        _ webView: WKWebView,
         runJavaScriptConfirmPanelWithMessage message: String,
         initiatedByFrame frame: WKFrameInfo,
-        completionHandler: @escaping (Bool) -> Void) {
+        completionHandler: @escaping (Bool) -> Void
+    ) {
 
-        // Set the message as the UIAlertController message
         let alert = UIAlertController(
             title: nil,
             message: message,
             preferredStyle: .alert
         )
 
-        // Add a confirmation action “Cancel”
         let cancelAction = UIAlertAction(
             title: "Cancel",
-            style: .cancel,
-            handler: { _ in
-                // Call completionHandler
-                completionHandler(false)
-            }
-        )
+            style: .cancel
+        ) { _ in
 
-        // Add a confirmation action “OK”
+            completionHandler(false)
+        }
+
         let okAction = UIAlertAction(
             title: "OK",
-            style: .default,
-            handler: { _ in
-                // Call completionHandler
-                completionHandler(true)
-            }
-        )
+            style: .default
+        ) { _ in
+
+            completionHandler(true)
+        }
+
         alert.addAction(cancelAction)
         alert.addAction(okAction)
 
-        // Display the NSAlert
-        present(alert, animated: true, completion: nil)
+        present(
+            alert,
+            animated: true,
+            completion: nil
+        )
     }
-    // Handle javascript: `window.prompt(prompt: String, defaultText: String?)`
-    func webView(_ webView: WKWebView,
+
+
+    // MARK: JavaScript Prompt
+
+    func webView(
+        _ webView: WKWebView,
         runJavaScriptTextInputPanelWithPrompt prompt: String,
         defaultText: String?,
         initiatedByFrame frame: WKFrameInfo,
-        completionHandler: @escaping (String?) -> Void) {
+        completionHandler: @escaping (String?) -> Void
+    ) {
 
-        // Set the message as the UIAlertController message
         let alert = UIAlertController(
             title: nil,
             message: prompt,
             preferredStyle: .alert
         )
 
-        // Add a confirmation action “Cancel”
         let cancelAction = UIAlertAction(
             title: "Cancel",
-            style: .cancel,
-            handler: { _ in
-                // Call completionHandler
-                completionHandler(nil)
-            }
-        )
+            style: .cancel
+        ) { _ in
 
-        // Add a confirmation action “OK”
+            completionHandler(nil)
+        }
+
         let okAction = UIAlertAction(
             title: "OK",
-            style: .default,
-            handler: { _ in
-                // Call completionHandler with Alert input
-                if let input = alert.textFields?.first?.text {
-                    completionHandler(input)
-                }
+            style: .default
+        ) { _ in
+
+            if let input =
+                alert.textFields?.first?.text {
+
+                completionHandler(input)
+
+            } else {
+
+                completionHandler(nil)
             }
-        )
+        }
 
         alert.addTextField { textField in
             textField.placeholder = defaultText
         }
+
         alert.addAction(cancelAction)
         alert.addAction(okAction)
 
-        // Display the NSAlert
-        present(alert, animated: true, completion: nil)
+        present(
+            alert,
+            animated: true,
+            completion: nil
+        )
     }
 
-    func downloadAndOpenFile(url: URL){
+
+    // MARK: Download and Open File
+
+    func downloadAndOpenFile(
+        url: URL
+    ) {
 
         let destinationFileUrl = url
-        let sessionConfig = URLSessionConfiguration.default
-        let session = URLSession(configuration: sessionConfig)
-        let request = URLRequest(url:url)
-        let task = session.downloadTask(with: request) { (tempLocalUrl, response, error) in
-            if let tempLocalUrl = tempLocalUrl, error == nil {
-                if let statusCode = (response as? HTTPURLResponse)?.statusCode {
-                    print("Successfully download. Status code: \(statusCode)")
+
+        let sessionConfig =
+            URLSessionConfiguration.default
+
+        let session =
+            URLSession(
+                configuration: sessionConfig
+            )
+
+        let request =
+            URLRequest(
+                url: url
+            )
+
+        let task =
+            session.downloadTask(
+                with: request
+            ) { (
+                tempLocalUrl,
+                response,
+                error
+            ) in
+
+                if let tempLocalUrl = tempLocalUrl,
+                   error == nil {
+
+                    if let statusCode =
+                        (response as? HTTPURLResponse)?.statusCode {
+
+                        print(
+                            "Successfully download. Status code: \(statusCode)"
+                        )
+                    }
+
+                    do {
+
+                        try FileManager.default.copyItem(
+                            at: tempLocalUrl,
+                            to: destinationFileUrl
+                        )
+
+                        self.openFile(
+                            url: destinationFileUrl
+                        )
+
+                    } catch let writeError {
+
+                        print(
+                            "Error creating a file \(destinationFileUrl): \(writeError)"
+                        )
+                    }
+
+                } else {
+
+                    print(
+                        "Error took place while downloading a file. " +
+                        "Error description: " +
+                        "\(error?.localizedDescription ?? "N/A")"
+                    )
                 }
-                do {
-                    try FileManager.default.copyItem(at: tempLocalUrl, to: destinationFileUrl)
-                    self.openFile(url: destinationFileUrl)
-                } catch (let writeError) {
-                    print("Error creating a file \(destinationFileUrl) : \(writeError)")
-                }
-            } else {
-                print("Error took place while downloading a file. Error description: \(error?.localizedDescription ?? "N/A") ")
             }
-        }
+
         task.resume()
     }
 
-    // func downloadAndOpenBase64File(base64String: String) {
-    //     // Split the base64 string to extract the data and the file extension
-    //     let components = base64String.components(separatedBy: ";base64,")
 
-    //     // Make sure the base64 string has the correct format
-    //     guard components.count == 2, let format = components.first?.split(separator: "/").last else {
-    //         print("Invalid base64 string format")
-    //         return
-    //     }
+    // MARK: Open File
 
-    //     // Remove the data type prefix to get the base64 data
-    //     let dataString = components.last!
+    func openFile(
+        url: URL
+    ) {
 
-    //     if let imageData = Data(base64Encoded: dataString) {
-    //         let documentsUrl: URL  =  FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-    //         let destinationFileUrl = documentsUrl.appendingPathComponent("image.\(format)")
+        self.documentController =
+            UIDocumentInteractionController(
+                url: url
+            )
 
-    //         do {
-    //             try imageData.write(to: destinationFileUrl)
-    //             self.openFile(url: destinationFileUrl)
-    //         } catch {
-    //             print("Error writing image to file url: \(destinationFileUrl): \(error)")
-    //         }
-    //     }
-    // }
-
-    func openFile(url: URL) {
-        self.documentController = UIDocumentInteractionController(url: url)
         self.documentController?.delegate = self
-        self.documentController?.presentPreview(animated: true)
+
+        self.documentController?.presentPreview(
+            animated: true
+        )
     }
 
-    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+
+    // MARK: WKDownloadDelegate
+
+    func webView(
+        _ webView: WKWebView,
+        navigationAction: WKNavigationAction,
+        didBecome download: WKDownload
+    ) {
+
         download.delegate = self
     }
 
-    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
-                suggestedFilename: String,
-                completionHandler: @escaping (URL?) -> Void) {
 
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let fileURL = documentsPath.appendingPathComponent(suggestedFilename)
+    func download(
+        _ download: WKDownload,
+        decideDestinationUsing response: URLResponse,
+        suggestedFilename: String,
+        completionHandler: @escaping (URL?) -> Void
+    ) {
 
-        // Remove existing file if it exists, otherwise it may show an old file/content just by having the same name.
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            try? FileManager.default.removeItem(at: fileURL)
+        let documentsPath =
+            FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+            )[0]
+
+        let fileURL =
+            documentsPath.appendingPathComponent(
+                suggestedFilename
+            )
+
+        // Remove existing file if it exists,
+        // otherwise it may show old content.
+        if FileManager.default.fileExists(
+            atPath: fileURL.path
+        ) {
+
+            try? FileManager.default.removeItem(
+                at: fileURL
+            )
         }
 
-        self.openFile(url: fileURL)
+        self.openFile(
+            url: fileURL
+        )
+
         completionHandler(fileURL)
     }
 }
