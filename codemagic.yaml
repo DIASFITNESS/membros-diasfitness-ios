@@ -1,1 +1,39 @@
-
+workflows: 
+  ios-members: 
+    name: Diasfitness Members iOS 
+    max_build_duration: 120 
+    instance_type: mac_mini_m2 
+ 
+    environment: 
+      xcode: latest 
+      cocoapods: default 
+ 
+      ios_signing: 
+        distribution_type: app_store 
+        bundle_identifier: "com.diasfitness.membros" 
+ 
+      vars: 
+        XCODE_WORKSPACE: "src/Membros Diasfitness.xcworkspace" 
+        XCODE_SCHEME: "Membros Diasfitness" 
+ 
+    scripts: 
+      - name: Instalar dependências CocoaPods 
+        script: | 
+          cd "$CM_BUILD_DIR/src" 
+          pod install 
+ 
+      - name: Configurar assinatura do projeto 
+        script: | 
+          xcode-project use-profiles 
+ 
+      - name: Compilar IPA 
+        script: | 
+          xcode-project build-ipa \ 
+            --workspace "$CM_BUILD_DIR/$XCODE_WORKSPACE" \ 
+            --scheme "$XCODE_SCHEME" 
+ 
+    artifacts: 
+      - build/ios/ipa/*.ipa 
+      - /tmp/xcodebuild_logs/*.log 
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app 
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
