@@ -14,7 +14,7 @@ workflows:
 
       ios_signing:
         distribution_type: app_store
-        bundle_identifier: com.diasfitness.membros
+        bundle_identifier: com.diasfitness.reader
 
       vars:
         XCODE_WORKSPACE: "src/Membros Diasfitness.xcworkspace"
