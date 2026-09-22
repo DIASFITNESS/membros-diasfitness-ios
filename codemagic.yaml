@@ -12,7 +12,7 @@ workflows:
       cocoapods: default
 
       groups:
-        - credenciais_da_loja_de_aplicativos
+        - appstore_credentials
 
       vars:
         BUNDLE_ID: "com.diasfitness.reader"
