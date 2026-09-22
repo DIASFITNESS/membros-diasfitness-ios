@@ -11,11 +11,11 @@ workflows:
       xcode: latest
       cocoapods: default
 
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.diasfitness.reader
+      groups:
+        - appstore_credentials
 
       vars:
+        BUNDLE_ID: "com.diasfitness.reader"
         XCODE_WORKSPACE: "src/Membros Diasfitness.xcworkspace"
         XCODE_SCHEME: "Membros Diasfitness"
 
@@ -24,6 +24,20 @@ workflows:
         script: |
           cd "$CM_BUILD_DIR/src"
           pod install
+
+      - name: Inicializar keychain
+        script: |
+          keychain initialize
+
+      - name: Buscar ou criar assinatura Apple
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+
+      - name: Adicionar certificados ao keychain
+        script: |
+          keychain add-certificates
 
       - name: Configurar assinatura do projeto
         script: |
