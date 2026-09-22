@@ -1,7 +1,6 @@
----
 workflows:
   ios-members:
-    name: Diasfitness Members iOS
+    name: Membros Diasfitness iOS
     max_build_duration: 120
     instance_type: mac_mini_m2
 
@@ -26,17 +25,17 @@ workflows:
           cd "$CM_BUILD_DIR/src"
           pod install
 
-      - name: Inicializar keychain para assinatura
+      - name: Inicializar keychain
         script: |
           keychain initialize
 
-      - name: Buscar ou criar arquivos de assinatura
+      - name: Buscar ou criar assinatura Apple
         script: |
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_STORE \
             --create
 
-      - name: Adicionar certificado ao keychain
+      - name: Adicionar certificados ao keychain
         script: |
           keychain add-certificates
 
