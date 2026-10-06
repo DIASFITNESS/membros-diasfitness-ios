@@ -35,11 +35,16 @@
 	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
+
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is used to take a profile photo for your account.</string>
+
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -59,6 +64,7 @@
 			</array>
 		</dict>
 	</dict>
+
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>processing</string>
