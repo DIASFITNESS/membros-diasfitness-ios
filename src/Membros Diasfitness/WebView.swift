@@ -15,6 +15,15 @@ func createWebView(container: UIView, WKSMH: WKScriptMessageHandler, WKND: WKNav
     userContentController.add(WKSMH, name: "push-permission-state")
     userContentController.add(WKSMH, name: "push-token")
 
+    // StoreKit 2 bridge is exposed only to the Reader's main frame.
+    userContentController.add(VC.iapBridge, name: "diasIAP")
+    let iapAvailabilityScript = WKUserScript(
+        source: "if (window.top === window && window.location.hostname === 'reader.diasfitness.com' && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diasIAP) { window.__diasIAPAvailable = true; }",
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true
+    )
+    userContentController.addUserScript(iapAvailabilityScript)
+
     config.userContentController = userContentController
 
     config.limitsNavigationsToAppBoundDomains = true;
