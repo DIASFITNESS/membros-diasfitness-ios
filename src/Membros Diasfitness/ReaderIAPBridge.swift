@@ -41,7 +41,9 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
             switch operation {
             case "getProducts":
                 try await loadProducts()
+                let requestedIDs = Set(payload["productIds"] as? [String] ?? Array(productIDs))
                 let items = productsByID.values
+                    .filter { requestedIDs.contains($0.id) }
                     .sorted { $0.id < $1.id }
                     .map { product in
                         [
@@ -99,10 +101,28 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                 respond(requestID, success: ["entitlements": entitlements])
 
             case "finish":
-                guard let transactionID = payload["transactionId"] as? String,
-                      let transaction = pendingTransactions[transactionID] else {
+                guard let transactionID = payload["transactionId"] as? String else {
                     throw BridgeError.transactionNotPending
                 }
+
+                // First use the in-memory transaction from the purchase flow.
+                // If the WebView/app was restarted, recover only an unfinished
+                // StoreKit transaction; never finish an arbitrary entitlement.
+                var transaction = pendingTransactions[transactionID]
+                if transaction == nil {
+                    for await result in Transaction.unfinished {
+                        guard case .verified(let candidate) = result else { continue }
+                        if String(candidate.id) == transactionID,
+                           productIDs.contains(candidate.productID) {
+                            transaction = candidate
+                            break
+                        }
+                    }
+                }
+                guard let transaction else {
+                    throw BridgeError.transactionNotPending
+                }
+
                 // JS must call finish only after the Reader backend confirms
                 // JWS validation and course-access provisioning.
                 await transaction.finish()
