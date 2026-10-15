@@ -19,6 +19,9 @@ class ViewController: UIViewController, WKNavigationDelegate, UIDocumentInteract
     @IBOutlet weak var connectionProblemView: UIImageView!
     @IBOutlet weak var webviewView: UIView!
     var toolbarView: UIToolbar!
+
+    // StoreKit 2 bridge is used only by WebView.swift for the Reader host.
+    lazy var iapBridge = ReaderIAPBridge { MembrosDiasfitness.webView }
     
     var htmlIsLoaded = false;
     private var loadingMode = LoadingMode.defaultCachePolicy
