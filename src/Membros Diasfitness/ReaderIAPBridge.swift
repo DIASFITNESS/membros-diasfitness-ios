@@ -71,7 +71,7 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                         "transactionId": String(transaction.id)
                     ])
                 case .userCancelled:
-                    respond(requestID, failure: "purchase_cancelled", message: "A compra foi cancelada.")
+                    respond(requestID, failure: "user_cancelled", message: "A compra foi cancelada.")
                 case .pending:
                     respond(requestID, failure: "purchase_pending", message: "A compra está pendente de aprovação.")
                 @unknown default:
