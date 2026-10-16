@@ -16,7 +16,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // See if our app is being launched via universal link.
         // If so, store that link so we can navigate to it once our webView is initialized.
         for userActivity in connectionOptions.userActivities {
-            if let universalLink = userActivity.webpageURL {
+            if let universalLink = userActivity.webpageURL, isReaderURL(universalLink) {
                 SceneDelegate.universalLinkToLaunch = universalLink;
                 break
             }
@@ -24,7 +24,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         // See if we were launched via shortcut
         if let shortcutUrl = connectionOptions.shortcutItem?.type {            
-            SceneDelegate.shortcutLinkToLaunch = URL.init(string: shortcutUrl)
+            if let url = URL(string: shortcutUrl), isReaderURL(url) {
+                SceneDelegate.shortcutLinkToLaunch = url
+            }
         }
         
         // See if we were launched via scheme URL
@@ -33,7 +35,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             var comps = URLComponents(url: schemeUrl, resolvingAgainstBaseURL: false)
             comps?.scheme = "https"
             
-            if let url = comps?.url {
+            if let url = comps?.url, isReaderURL(url) {
                 SceneDelegate.universalLinkToLaunch = url;
             }
         }
@@ -46,9 +48,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             var comps = URLComponents(url: scheme, resolvingAgainstBaseURL: false)
             comps?.scheme = "https"
 
-            if let url = comps?.url {
+            if let url = comps?.url, isReaderURL(url) {
                 // Handle it inside our web view in a SPA-friendly way.
-                MembrosDiasfitness.webView.evaluateJavaScript("location.href = '\(url)'")
+                navigateToReader(url)
             }
         }
     }
@@ -61,21 +63,32 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         
         // Ensure we're trying to launch a link.
         guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
-            let universalLink = userActivity.webpageURL else {
+            let universalLink = userActivity.webpageURL, isReaderURL(universalLink) else {
             return
         }
 
         // Handle it inside our web view in a SPA-friendly way.
-        MembrosDiasfitness.webView.evaluateJavaScript("location.href = '\(universalLink)'")
+        navigateToReader(universalLink)
     }
 
     // This function is called if our app is already loaded and the user activates the app via shortcut
     func windowScene(_ windowScene: UIWindowScene,
                      performActionFor shortcutItem: UIApplicationShortcutItem,
                      completionHandler: @escaping (Bool) -> Void) {
-        if let shortcutUrl = URL.init(string: shortcutItem.type) {
-            MembrosDiasfitness.webView.evaluateJavaScript("location.href = '\(shortcutUrl)'");
+        guard let url = URL(string: shortcutItem.type), isReaderURL(url) else {
+            completionHandler(false)
+            return
         }
+        navigateToReader(url)
+        completionHandler(true)
+    }
+
+    private func navigateToReader(_ url: URL) {
+        guard isReaderURL(url), let webView = MembrosDiasfitness.webView,
+              isReaderURL(webView.url),
+              let data = try? JSONSerialization.data(withJSONObject: url.absoluteString, options: [.fragmentsAllowed]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("if (window.location.origin === 'https://reader.diasfitness.com') { window.location.href = \(json); }")
     }
 
     func sceneDidDisconnect(_ scene: UIScene) {
