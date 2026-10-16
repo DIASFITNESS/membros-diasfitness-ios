@@ -14,15 +14,47 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
     private var productsByID: [String: Product] = [:]
     private var pendingTransactions: [String: Transaction] = [:]
 
+    private var updatesTask: Task<Void, Never>?
+    private var activeRequestIDs: Set<String> = []
+    private var finishingTransactionIDs: Set<String> = []
+
     init(webViewProvider: @escaping () -> WKWebView?) {
         self.webViewProvider = webViewProvider
         super.init()
+        updatesTask = Task { @MainActor [weak self] in
+            for await result in Transaction.updates {
+                guard !Task.isCancelled else { return }
+                self?.remember(result)
+            }
+        }
+        // StoreKit persists unfinished transactions across application restarts.
+        Task { @MainActor [weak self] in
+            for await result in Transaction.unfinished {
+                self?.remember(result)
+            }
+        }
+    }
+
+    deinit {
+        updatesTask?.cancel()
+    }
+
+    @MainActor
+    private func remember(_ result: VerificationResult<Transaction>) {
+        guard case .verified(let transaction) = result,
+              productIDs.contains(transaction.productID) else { return }
+        pendingTransactions[String(transaction.id)] = transaction
+        // No unsolicited JS callback and, critically, no automatic finish.
+        // The existing restore/sync response delivers recovered JWS payloads.
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "diasIAP",
               message.frameInfo.isMainFrame,
+              message.frameInfo.securityOrigin.protocol == "https",
               message.frameInfo.securityOrigin.host == "reader.diasfitness.com",
+              [0, 443].contains(message.frameInfo.securityOrigin.port),
+              isReaderURL(message.webView?.url),
               let body = message.body as? [String: Any],
               let requestID = body["id"] as? String,
               let operation = body["op"] as? String else {
@@ -31,6 +63,12 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
 
         let payload = body["payload"] as? [String: Any] ?? [:]
         Task { @MainActor in
+            guard isReaderURL(webViewProvider()?.url),
+                  !activeRequestIDs.contains(requestID) else { return }
+            activeRequestIDs.insert(requestID)
+            defer {
+                activeRequestIDs.remove(requestID)
+            }
             await handle(operation: operation, requestID: requestID, payload: payload)
         }
     }
@@ -63,6 +101,7 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                     throw BridgeError.invalidProduct
                 }
 
+                guard isReaderURL(webViewProvider()?.url) else { return }
                 let result = try await product.purchase()
                 switch result {
                 case .success(let verification):
@@ -84,20 +123,16 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                 if operation == "sync" {
                     try await AppStore.sync()
                 }
-                var entitlements: [[String: Any]] = []
+                // Deduplicate by transaction ID across the two StoreKit sequences.
+                // Include unfinished consumables/interrupted purchases as well as entitlements.
+                var recovered: [String: [String: Any]] = [:]
                 for await result in Transaction.currentEntitlements {
-                    guard case .verified(let transaction) = result,
-                          productIDs.contains(transaction.productID) else {
-                        continue
-                    }
-                    let transactionID = String(transaction.id)
-                    pendingTransactions[transactionID] = transaction
-                    entitlements.append([
-                        "signedTransaction": result.jwsRepresentation,
-                        "transactionId": transactionID,
-                        "originalTransactionId": String(transaction.originalID)
-                    ])
+                    appendRecovery(result, to: &recovered)
                 }
+                for await result in Transaction.unfinished {
+                    appendRecovery(result, to: &recovered)
+                }
+                let entitlements = recovered.keys.sorted().compactMap { recovered[$0] }
                 respond(requestID, success: ["entitlements": entitlements])
 
             case "finish":
@@ -123,6 +158,13 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                     throw BridgeError.transactionNotPending
                 }
 
+                guard isReaderURL(webViewProvider()?.url) else { return }
+                guard !finishingTransactionIDs.contains(transactionID) else {
+                    throw BridgeError.transactionNotPending
+                }
+                finishingTransactionIDs.insert(transactionID)
+                defer { finishingTransactionIDs.remove(transactionID) }
+
                 // JS must call finish only after the Reader backend confirms
                 // JWS validation and course-access provisioning.
                 await transaction.finish()
@@ -135,6 +177,18 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
         } catch {
             respond(requestID, failure: "iap_error", message: error.localizedDescription)
         }
+    }
+
+    @MainActor
+    private func appendRecovery(_ result: VerificationResult<Transaction>, to recovered: inout [String: [String: Any]]) {
+        guard case .verified(let transaction) = result,
+              productIDs.contains(transaction.productID) else { return }
+        remember(result)
+        recovered[String(transaction.id)] = [
+            "signedTransaction": result.jwsRepresentation,
+            "transactionId": String(transaction.id),
+            "originalTransactionId": String(transaction.originalID)
+        ]
     }
 
     @MainActor
@@ -168,6 +222,7 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
     @MainActor
     private func sendJavaScriptCallback(requestID: String, result: [String: Any]) {
         guard let webView = webViewProvider(),
+              isReaderURL(webView.url),
               let resultData = try? JSONSerialization.data(withJSONObject: result, options: [.fragmentsAllowed]),
               let resultJSON = String(data: resultData, encoding: .utf8),
               let idData = try? JSONSerialization.data(withJSONObject: requestID, options: [.fragmentsAllowed]),
@@ -175,7 +230,7 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
             return
         }
 
-        webView.evaluateJavaScript("window.__diasIAPResolve && window.__diasIAPResolve(\(idJSON), \(resultJSON));", completionHandler: nil)
+        webView.evaluateJavaScript("if (window.top === window && window.location.origin === 'https://reader.diasfitness.com') { window.__diasIAPResolve && window.__diasIAPResolve(\(idJSON), \(resultJSON)); }", completionHandler: nil)
     }
 
     private enum BridgeError: LocalizedError {

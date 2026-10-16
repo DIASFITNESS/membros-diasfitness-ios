@@ -1,5 +1,6 @@
 import WebKit
 import FirebaseMessaging
+import FirebaseCore
 
 class SubscribeMessage {
     var topic  = ""
@@ -25,6 +26,7 @@ class SubscribeMessage {
 }
 
 func handleSubscribeTouch(message: WKScriptMessage) {
+    guard FirebaseApp.app() != nil else { return }
   // [START subscribe_topic]
     let subscribeMessages = parseSubscribeMessage(message: message)
     if (subscribeMessages.count > 0){
@@ -134,9 +136,10 @@ func handlePushState() {
 }
 
 func checkViewAndEvaluate(event: String, detail: String) {
-    if (!MembrosDiasfitness.webView.isHidden && !MembrosDiasfitness.webView.isLoading ) {
+    if let webView = MembrosDiasfitness.webView, !webView.isHidden && !webView.isLoading {
         DispatchQueue.main.async(execute: {
-            MembrosDiasfitness.webView.evaluateJavaScript("this.dispatchEvent(new CustomEvent('\(event)', { detail: \(detail) }))")
+            guard isReaderURL(MembrosDiasfitness.webView?.url) else { return }
+            MembrosDiasfitness.webView.evaluateJavaScript("if (window.location.origin === 'https://reader.diasfitness.com') { this.dispatchEvent(new CustomEvent('\(event)', { detail: \(detail) })); }")
         })
     }
     else {
@@ -147,6 +150,7 @@ func checkViewAndEvaluate(event: String, detail: String) {
 }
 
 func handleFCMToken(){
+    guard FirebaseApp.app() != nil else { return }
     DispatchQueue.main.async(execute: {
         Messaging.messaging().token { token, error in
             if let error = error {

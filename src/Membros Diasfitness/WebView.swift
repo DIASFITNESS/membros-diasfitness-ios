@@ -4,6 +4,15 @@ import AuthenticationServices
 import SafariServices
 
 
+// A single origin policy shared by navigation, deep links and native bridges.
+func isReaderURL(_ url: URL?) -> Bool {
+    guard let url = url else { return false }
+    return url.scheme?.lowercased() == "https"
+        && url.host?.lowercased() == "reader.diasfitness.com"
+        && (url.port == nil || url.port == 443)
+        && url.user == nil && url.password == nil
+}
+
 func createWebView(container: UIView, WKSMH: WKScriptMessageHandler, WKND: WKNavigationDelegate, NSO: NSObject, VC: ViewController) -> WKWebView{
 
     let config = WKWebViewConfiguration()
@@ -18,7 +27,7 @@ func createWebView(container: UIView, WKSMH: WKScriptMessageHandler, WKND: WKNav
     // StoreKit 2 bridge is exposed only to the Reader's main frame.
     userContentController.add(VC.iapBridge, name: "diasIAP")
     let iapAvailabilityScript = WKUserScript(
-        source: "if (window.top === window && window.location.hostname === 'reader.diasfitness.com' && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diasIAP) { window.__diasIAPAvailable = true; }",
+        source: "if (window.top === window && window.location.origin === 'https://reader.diasfitness.com' && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diasIAP) { window.__diasIAPAvailable = true; }",
         injectionTime: .atDocumentStart,
         forMainFrameOnly: true
     )
@@ -140,41 +149,16 @@ extension ViewController: WKUIDelegate, WKDownloadDelegate {
                 return
             }
 
-            if let requestHost = requestUrl.host {
-                // NOTE: Match auth origin first, because host origin may be a subset of auth origin and may therefore always match
-                let matchingAuthOrigin = authOrigins.first(where: { requestHost.range(of: $0) != nil })
-                if (matchingAuthOrigin != nil) {
+            if requestUrl.host != nil {
+                if isReaderURL(requestUrl) {
                     decisionHandler(.allow)
-                    if (toolbarView.isHidden) {
-                        toolbarView.isHidden = false
-                        webView.frame = calcWebviewFrame(webviewView: webviewView, toolbarView: toolbarView)
-                    }
-                    return
-                }
-
-                let matchingHostOrigin = allowedOrigins.first(where: { requestHost.range(of: $0) != nil })
-                if (matchingHostOrigin != nil) {
-                    // Open in main webview
-                    decisionHandler(.allow)
-                    if (!toolbarView.isHidden) {
+                    if !toolbarView.isHidden {
                         toolbarView.isHidden = true
                         webView.frame = calcWebviewFrame(webviewView: webviewView, toolbarView: nil)
                     }
                     return
                 }
-                if (navigationAction.navigationType == .other &&
-                    navigationAction.value(forKey: "syntheticClickType") as! Int == 0 &&
-                    (navigationAction.targetFrame != nil) &&
-                    // no error here, fake warning
-                    (navigationAction.sourceFrame != nil)
-                ) {
-                    decisionHandler(.allow)
-                    return
-                }
-                else {
-                    decisionHandler(.cancel)
-                }
-
+                decisionHandler(.cancel)
 
                 if ["http", "https"].contains(requestUrl.scheme?.lowercased() ?? "") {
                     // Can open with SFSafariViewController

@@ -260,6 +260,11 @@ extension UIColor {
 
 extension ViewController: WKScriptMessageHandler {
   func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame,
+              message.frameInfo.securityOrigin.protocol == "https",
+              message.frameInfo.securityOrigin.host == "reader.diasfitness.com",
+              [0, 443].contains(message.frameInfo.securityOrigin.port),
+              isReaderURL(message.webView?.url) else { return }
         if message.name == "print" {
             printView(webView: MembrosDiasfitness.webView)
         }

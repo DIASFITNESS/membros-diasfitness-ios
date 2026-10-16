@@ -11,11 +11,20 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
 
-// TODO: if we're using Firebase, uncomment next string
-        //FirebaseApp.configure()
+        // Keep push support, but never initialize the PWABuilder template project.
+        if FirebaseApp.app() == nil,
+           let path = Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist"),
+           let options = FirebaseOptions(contentsOfFile: path),
+           options.bundleID == Bundle.main.bundleIdentifier,
+           !options.gcmSenderID.isEmpty,
+           !options.gcmSenderID.allSatisfy({ $0 == "0" }) {
+            FirebaseApp.configure(options: options)
+        }
 
         // [START set_messaging_delegate]
-        Messaging.messaging().delegate = self
+        if FirebaseApp.app() != nil {
+            Messaging.messaging().delegate = self
+        }
         // [END set_messaging_delegate]
         // Register for remote notifications. This shows a permission dialog on first run, to
         // show the dialog at a more appropriate time move this registration accordingly.
