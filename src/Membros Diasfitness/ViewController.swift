@@ -150,6 +150,14 @@ class ViewController: UIViewController, WKNavigationDelegate, UIDocumentInteract
         self.loadingMode = loadingMode
     }
     
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        iapBridge.documentWillChange(in: webView)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        iapBridge.documentWillChange(in: webView)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!){
         htmlIsLoaded = true
         
