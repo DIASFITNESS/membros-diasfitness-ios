@@ -6,13 +6,10 @@ import os
 /// Native StoreKit 2 bridge for the Reader web app only.
 final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
     private let webViewProvider: () -> WKWebView?
-    private let productIDs: Set<String> = [
-        "com.diasfitness.reader.coreografias_fitness",
-        "com.diasfitness.reader.alongamento",
-        "com.diasfitness.reader.avaliacao_funcional"
-    ]
+    // Per-request resource limits, not a catalog or a product authorization policy.
+    private static let maximumProductIDsPerRequest = 100
+    private static let maximumProductIDLength = 100
 
-    private var productsByID: [String: Product] = [:]
     private var pendingTransactions: [String: Transaction] = [:]
 
     // A navigation invalidates delivery even when the next page has the same origin.
@@ -40,6 +37,7 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
     private var updatesTask: Task<Void, Never>?
     private var activeRequestIDs: Set<String> = []
     private var finishingTransactionIDs: Set<String> = []
+    private var finishedTransactionIDs: Set<String> = []
 
     init(webViewProvider: @escaping () -> WKWebView?) {
         self.webViewProvider = webViewProvider
@@ -64,9 +62,11 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
 
     @MainActor
     private func remember(_ result: VerificationResult<Transaction>) {
-        guard case .verified(let transaction) = result,
-              productIDs.contains(transaction.productID) else { return }
+        guard case .verified(let transaction) = result else { return }
+        guard !finishedTransactionIDs.contains(String(transaction.id)) else { return }
         pendingTransactions[String(transaction.id)] = transaction
+        // StoreKit sequences are scoped to this app. Active products and account
+        // ownership remain backend decisions, not a JS-provided recovery filter.
         // No unsolicited JS callback and, critically, no automatic finish.
         // The existing restore/sync response delivers recovered JWS payloads.
     }
@@ -114,10 +114,9 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
         do {
             switch operation {
             case "getProducts":
-                try await loadProducts()
-                let requestedIDs = Set(payload["productIds"] as? [String] ?? Array(productIDs))
-                let items = productsByID.values
-                    .filter { requestedIDs.contains($0.id) }
+                let requestedIDs = try validatedProductIDs(payload["productIds"])
+                let products = try await loadProducts(for: requestedIDs)
+                let items = products
                     .sorted { $0.id < $1.id }
                     .map { product in
                         [
@@ -130,10 +129,12 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                 await respond(requestID, context: context, success: ["products": items])
 
             case "purchase":
-                try await loadProducts()
-                guard let productID = payload["productId"] as? String,
-                      productIDs.contains(productID),
-                      let product = productsByID[productID] else {
+                guard let productID = payload["productId"] as? String else {
+                    throw BridgeError.invalidProduct
+                }
+                let requestedIDs = try validatedProductIDs([productID])
+                let products = try await loadProducts(for: requestedIDs)
+                guard let product = products.first(where: { $0.id == productID }) else {
                     throw BridgeError.invalidProduct
                 }
 
@@ -145,6 +146,9 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                 switch result {
                 case .success(let verification):
                     let transaction = try verified(verification)
+                    guard transaction.productID == productID else {
+                        throw BridgeError.invalidProduct
+                    }
                     pendingTransactions[String(transaction.id)] = transaction
                     await respond(requestID, context: context, success: [
                         "signedTransaction": verification.jwsRepresentation,
@@ -179,37 +183,39 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
                     throw BridgeError.transactionNotPending
                 }
 
-                // First use the in-memory transaction from the purchase flow.
-                // If the WebView/app was restarted, recover only an unfinished
-                // StoreKit transaction; never finish an arbitrary entitlement.
-                var transaction = pendingTransactions[transactionID]
-                if transaction == nil {
-                    for await result in Transaction.unfinished {
-                        guard case .verified(let candidate) = result else { continue }
-                        if String(candidate.id) == transactionID,
-                           productIDs.contains(candidate.productID) {
-                            transaction = candidate
-                            break
-                        }
-                    }
-                }
-                guard let transaction else {
-                    throw BridgeError.transactionNotPending
-                }
-
-                guard isCurrent(context) else {
-                    diagnose(.documentChanged)
-                    return
-                }
-                guard !finishingTransactionIDs.contains(transactionID) else {
+                // Reserve before the first suspension: another request must not
+                // enumerate and finish the same transaction concurrently.
+                guard !finishingTransactionIDs.contains(transactionID),
+                      !finishedTransactionIDs.contains(transactionID) else {
                     throw BridgeError.transactionNotPending
                 }
                 finishingTransactionIDs.insert(transactionID)
                 defer { finishingTransactionIDs.remove(transactionID) }
 
+                // Memory may also contain already-finished current entitlements.
+                // Always require an app-scoped, verified unfinished transaction,
+                // including after restart and without a prior product lookup.
+                var transaction: Transaction?
+                for await result in Transaction.unfinished {
+                    guard case .verified(let candidate) = result else { continue }
+                    if String(candidate.id) == transactionID {
+                        transaction = candidate
+                        break
+                    }
+                }
+                guard let transaction else {
+                    throw BridgeError.transactionNotPending
+                }
+                guard isCurrent(context) else {
+                    diagnose(.documentChanged)
+                    return
+                }
+
                 // JS must call finish only after the Reader backend confirms
-                // JWS validation and course-access provisioning.
+                // JWS validation and course-access provisioning. This is the
+                // existing frontend contract, NOT native proof of backend approval.
                 await transaction.finish()
+                finishedTransactionIDs.insert(transactionID)
                 pendingTransactions.removeValue(forKey: transactionID)
                 await respond(requestID, context: context, success: ["finished": true])
 
@@ -223,8 +229,7 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
 
     @MainActor
     private func appendRecovery(_ result: VerificationResult<Transaction>, to recovered: inout [String: [String: Any]]) {
-        guard case .verified(let transaction) = result,
-              productIDs.contains(transaction.productID) else { return }
+        guard case .verified(let transaction) = result else { return }
         remember(result)
         recovered[String(transaction.id)] = [
             "signedTransaction": result.jwsRepresentation,
@@ -233,10 +238,31 @@ final class ReaderIAPBridge: NSObject, WKScriptMessageHandler {
         ]
     }
 
+    private func validatedProductIDs(_ value: Any?) throws -> Set<String> {
+        guard let ids = value as? [String],
+              ids.count <= Self.maximumProductIDsPerRequest else {
+            throw BridgeError.invalidProduct
+        }
+        // Apple Product IDs use ASCII letters, digits, periods, hyphens and
+        // underscores, with at most 100 characters. Never trim or rewrite IDs.
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+        guard ids.allSatisfy({ id in
+            !id.isEmpty && id.utf8.count <= Self.maximumProductIDLength
+                && id.unicodeScalars.allSatisfy { allowed.contains($0) }
+        }) else {
+            throw BridgeError.invalidProduct
+        }
+        return Set(ids)
+    }
+
     @MainActor
-    private func loadProducts() async throws {
-        let products = try await Product.products(for: Array(productIDs))
-        productsByID = Dictionary(uniqueKeysWithValues: products.map { ($0.id, $0) })
+    private func loadProducts(for requestedIDs: Set<String>) async throws -> [Product] {
+        guard !requestedIDs.isEmpty else { return [] }
+        // Results are local to this request: overlapping lookups cannot overwrite
+        // each other's cache. StoreKit decides availability; the backend decides
+        // active catalog membership, transaction ownership and course access.
+        let products = try await Product.products(for: requestedIDs.sorted())
+        return products.filter { requestedIDs.contains($0.id) }
     }
 
     private func verified<T>(_ result: VerificationResult<T>) throws -> T {

@@ -1,5 +1,10 @@
 # Reader IAP callback correction — candidate 1 (5)
 
+Historical callback-validation record. The later dynamic catalog implementation
+and current test results are documented in [reader-iap-dynamic-catalog.md](reader-iap-dynamic-catalog.md).
+The original fixed catalog and broad helper hash described below are superseded;
+callback behavior and the cryptographic verifier remain preserved.
+
 Base reviewed: `00dc8d3882c2ed3d1503303790ddef5a210cf7b4` on `main`.
 This change is a review candidate, not an iOS build or a demonstrated fix for the
 reported purchase-confirmation incident. No purchase or finish was executed.
