@@ -107,15 +107,146 @@ test('static: native binds original view and generation and invalidates on navig
     assert.match(method, /iapBridge\.documentWillChange\(in: webView\)/);
   }
 });
-test('static: recovery and cryptographic verification remain unchanged from audited base', () => {
+test('static: cryptographic verification and recovery response contract remain intact', () => {
   // SHA-256 of unchanged blocks at audited commit 00dc8d3882c2ed3d1503303790ddef5a210cf7b4.
   const digest = value => crypto.createHash('sha256').update(value).digest('hex');
   const between = (s, start, end) => s.slice(s.indexOf(start), s.indexOf(end));
-  assert.equal(digest(between(source, 'private func appendRecovery', '    // Called for provisional')), '9620d89a8c38c0c92c4d056bfd226b18375fe106f12355d94f03690d9634b420');
+  assert.equal(digest(between(source, 'private func verified<T>', '    // Called for provisional')), '10da04667932dfb4a743a62d432c94f7edcfd24558db46a6b5048f788b038bdd');
   const normalize = s => s.replaceAll('await respond(requestID, context: context,', 'respond(requestID,');
   assert.equal(digest(normalize(between(source, 'case "restore", "sync":', '            case "finish":'))), '03ce36616d2240a7a787e61a9aac69ef2853bb4c43d3708b138a4e7d0edd1a96');
   assert.equal((source.match(/await transaction\.finish\(\)/g) || []).length, 1);
   const finish = between(source, 'case "finish":', '            default:');
   assert.match(finish, /await transaction\.finish\(\)/);
   assert.doesNotMatch(between(source, 'case "purchase":', 'case "restore", "sync":'), /\.finish\(/);
+});
+
+// These fixtures exercise the REAL callback JS, not Product.products or purchase.
+const existingIDs = [
+  'com.diasfitness.reader.coreografias_fitness',
+  'com.diasfitness.reader.alongamento',
+  'com.diasfitness.reader.avaliacao_funcional'
+];
+const gapID = 'com.diasfitness.reader.gap';
+const catalog26 = [...existingIDs, gapID,
+  ...Array.from({ length: 22 }, (_, i) => `com.diasfitness.reader.synthetic_course_${i + 1}`)];
+for (const [label, ids] of [
+  ['three existing products', existingIDs], ['GAP', [gapID]],
+  ['26 products (22 synthetic fixtures)', catalog26],
+  ['future product without a native catalog entry', ['com.diasfitness.reader.future_course']]
+]) {
+  test(`callback simulation: ${label} preserves product fields`, () => {
+    const p = page(); const token = capture(p); const calls = [];
+    p.window.__diasIAPResolve = (...args) => calls.push(args);
+    const result = { ok: true, data: { products: ids.map(id => ({
+      id, title: id, description: 'Curso sintético', displayPrice: 'R$ 19,90'
+    })) } };
+    assert.equal(deliver(p, token, 'catalog', result), 'delivered');
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [['catalog', result]]);
+  });
+}
+test('callback simulation: unavailable product yields an empty list without fabricated metadata', () => {
+  const p = page(); const token = capture(p); let actual;
+  p.window.__diasIAPResolve = (_, result) => { actual = result; };
+  deliver(p, token, 'unavailable', { ok: true, data: { products: [] } });
+  assert.deepEqual(JSON.parse(JSON.stringify(actual)), { ok: true, data: { products: [] } });
+});
+test('callback simulation: overlapping lookups retain their request IDs in reverse completion order', async () => {
+  const p = page(); const token = capture(p); const calls = [];
+  p.window.__diasIAPResolve = (...args) => calls.push(args);
+  const first = { ok: true, data: { products: [{ id: gapID }] } };
+  const second = { ok: true, data: { products: [{ id: existingIDs[0] }] } };
+  let completeFirst;
+  const pending = new Promise(resolve => { completeFirst = resolve; });
+  const firstDelivery = pending.then(() => deliver(p, token, 'first', first));
+  deliver(p, token, 'second', second);
+  completeFirst(); await firstDelivery;
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [['second', second], ['first', first]]);
+});
+test('callback simulation: cancellation, pending and validation errors retain the existing envelope', () => {
+  for (const code of ['user_cancelled', 'purchase_pending', 'iap_error']) {
+    const p = page(); const token = capture(p); let actual;
+    p.window.__diasIAPResolve = (_, result) => { actual = result; };
+    const result = { ok: false, error: { code, message: 'Erro sintético' } };
+    assert.equal(deliver(p, token, code, result), 'delivered');
+    assert.deepEqual(JSON.parse(JSON.stringify(actual)), result);
+  }
+});
+test('callback simulation: recovered new products preserve JWS and large transaction IDs', () => {
+  const p = page(); const token = capture(p); let actual;
+  p.window.__diasIAPResolve = (_, result) => { actual = result; };
+  const result = { ok: true, data: { entitlements: [gapID, 'future'].map((id, i) => ({
+    signedTransaction: `synthetic-jws-${id}`, transactionId: `900719925474099${i + 3}`,
+    originalTransactionId: '9007199254740993'
+  })) } };
+  assert.equal(deliver(p, token, 'restore', result), 'delivered');
+  assert.deepEqual(JSON.parse(JSON.stringify(actual)), result);
+});
+
+// Source-level guardrails below do not execute Swift or simulate Apple services.
+const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end));
+test('static: no native catalog, fallback IDs or shared product cache remain', () => {
+  assert.doesNotMatch(source, /com\.diasfitness\.reader\.[A-Za-z0-9_]+|productsByID|\bproductIDs\b/);
+  const get = section('case "getProducts":', 'case "purchase":');
+  assert.match(get, /validatedProductIDs\(payload\["productIds"\]\)/);
+  assert.match(get, /loadProducts\(for: requestedIDs\)/);
+  assert.doesNotMatch(get, /\?\?/);
+  const load = section('private func loadProducts', 'private func verified');
+  assert.match(load, /Product\.products\(for: requestedIDs\.sorted\(\)\)/);
+  assert.match(load, /requestedIDs\.contains\(\$0\.id\)/);
+});
+test('static: malformed payloads and request sizes are checked before deduplication', () => {
+  const validate = section('private func validatedProductIDs', '    @MainActor\n    private func loadProducts');
+  assert.match(validate, /value as\? \[String\]/);
+  assert.match(validate, /ids\.count <= Self\.maximumProductIDsPerRequest/);
+  assert.match(source, /maximumProductIDsPerRequest = 100/);
+  assert.match(source, /maximumProductIDLength = 100/);
+  assert.match(validate, /!id\.isEmpty && id\.utf8\.count <= Self\.maximumProductIDLength/);
+  assert.match(validate, /id\.unicodeScalars\.allSatisfy \{ allowed\.contains\(\$0\) \}/);
+  assert.match(validate, /CharacterSet\(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\._-"\)/);
+  assert.ok(validate.indexOf('ids.count <=') < validate.indexOf('return Set(ids)'));
+});
+test('static: purchase requires the exact queried StoreKit product and verified matching transaction', () => {
+  const purchase = section('case "purchase":', 'case "restore", "sync":');
+  assert.match(purchase, /validatedProductIDs\(\[productID\]\)/);
+  assert.match(purchase, /products\.first\(where: \{ \$0\.id == productID \}\)/);
+  assert.ok(purchase.indexOf('products.first') < purchase.indexOf('product.purchase()'));
+  assert.match(purchase, /let transaction = try verified\(verification\)/);
+  assert.match(purchase, /guard transaction\.productID == productID/);
+  assert.match(purchase, /case \.userCancelled:/);
+  assert.match(purchase, /case \.pending:/);
+});
+test('static: recovery and observers require verified app-scoped transactions without catalog lookup', () => {
+  for (const block of [section('private func remember', '    func userContentController'),
+    section('private func appendRecovery', 'private func validatedProductIDs')]) {
+    assert.match(block, /guard case \.verified\(let transaction\) = result else \{ return \}/);
+    assert.doesNotMatch(block, /loadProducts|requestedIDs|validatedProductIDs/);
+  }
+  for (const sequence of ['Transaction.updates', 'Transaction.unfinished', 'Transaction.currentEntitlements']) {
+    assert.ok(source.includes(sequence));
+  }
+  const recovery = section('case "restore", "sync":', 'case "finish":');
+  assert.match(recovery, /if operation == "sync" \{\s*try await AppStore\.sync\(\)/);
+  assert.match(recovery, /recovered\.keys\.sorted\(\)/);
+});
+test('static: finish reserves before suspension and never trusts a cached entitlement', () => {
+  const finish = section('case "finish":', '            default:');
+  assert.match(finish, /!finishingTransactionIDs\.contains\(transactionID\)/);
+  assert.match(finish, /!finishedTransactionIDs\.contains\(transactionID\)/);
+  assert.ok(finish.indexOf('finishingTransactionIDs.insert') < finish.indexOf('for await'));
+  assert.match(finish, /defer \{ finishingTransactionIDs\.remove\(transactionID\) \}/);
+  assert.match(finish, /for await result in Transaction\.unfinished/);
+  assert.match(finish, /guard case \.verified\(let candidate\) = result else \{ continue \}/);
+  assert.match(finish, /String\(candidate\.id\) == transactionID/);
+  assert.doesNotMatch(finish, /pendingTransactions\[|currentEntitlements/);
+  assert.ok(finish.indexOf('guard isCurrent(context)') < finish.indexOf('await transaction.finish()'));
+  assert.ok(finish.indexOf('await transaction.finish()') < finish.indexOf('finishedTransactionIDs.insert'));
+  assert.match(finish, /NOT native proof of backend approval/);
+});
+test('static: native origin checks retain the exact HTTPS Reader main frame and port', () => {
+  const handler = section('func userContentController', 'private func handle');
+  assert.match(handler, /message\.frameInfo\.isMainFrame/);
+  assert.match(handler, /securityOrigin\.protocol == "https"/);
+  assert.match(handler, /securityOrigin\.host == "reader\.diasfitness\.com"/);
+  assert.match(handler, /\[0, 443\]\.contains\(message\.frameInfo\.securityOrigin\.port\)/);
+  assert.match(handler, /isReaderURL\(message\.webView\?\.url\)/);
 });
